@@ -1,0 +1,13 @@
+Imagen,Probabilidad_Criterio,Resultado
+../test_images\img10.jpg,0.9383759498596191,Cumple criterio
+../test_images\img6.jpg,0.9220616221427917,Cumple criterio
+../test_images\img7.jpg,0.9383759498596191,Cumple criterio
+../test_images\img8.jpg,0.9583321213722229,Cumple criterio
+../test_images\img_0_903.jpg,0.08082685619592667,No cumple criterio
+../test_images\img_0_904.jpg,0.037572167813777924,No cumple criterio
+../test_images\img_0_909.jpg,0.007572108414024115,No cumple criterio
+../test_images\img_0_92.jpg,0.9510107636451721,Cumple criterio
+../test_images\img_0_937.jpg,0.946245014667511,Cumple criterio
+../test_images\img_0_948.jpg,0.9558046460151672,Cumple criterio
+../test_images\img_0_99.jpg,0.04881153628230095,No cumple criterio
+../test_images\img_0_993.jpg,0.9621075391769409,Cumple criterio
