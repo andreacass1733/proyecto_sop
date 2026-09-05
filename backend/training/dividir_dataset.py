@@ -2,7 +2,7 @@
 import os
 ### Ayuda para la mezcla de las imagenes aleatoriamente
 import random
-### Copia de archivos -> En neustro caso las imagenes
+### Copia de archivos -> En nuestro caso las imagenes
 import shutil
 
 # Rutas

@@ -1,0 +1,23 @@
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+
+# Models & Outputs
+outputs/
+test_images/
+*.keras
+*.h5
+*.onnx
+
+# IDEs
+.vscode/
+.idea/
