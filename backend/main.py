@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import criterio3
+from routers import criterio3, pacientes, antecedentes
 from services.criterio3_service import get_model
 from db.supabase_client import supabase
 
@@ -74,6 +74,8 @@ RUTAS_PUBLICAS = {"/", "/docs", "/openapi.json", "/redoc"}
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(criterio3.router)
+app.include_router(pacientes.router)
+app.include_router(antecedentes.router)
 
 # Se agregan cuando estén listos:
 # app.include_router(criterio1.router)
