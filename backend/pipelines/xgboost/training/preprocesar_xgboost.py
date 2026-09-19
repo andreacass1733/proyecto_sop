@@ -8,7 +8,7 @@ import joblib
 
 def preprocesar_datos_xgboost():
     """
-    Script de preprocesamiento exclusivo para el modelo XGBoost (35% Tarea 2).
+    Script de preprocesamiento exclusivo para el modelo XGBoost.
     Carga datasets de raw_data, limpia, estandariza y guarda artefactos en processed_data y models.
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
