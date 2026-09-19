@@ -86,21 +86,45 @@ def get_model() -> tf.keras.Model:
 
 def _preprocesar_imagen(img_path: str) -> np.ndarray:
     """
-    Prepara una imagen para que el modelo pueda procesarla:
+    Prepara cada nueva imagen subida por el médico en tiempo real:
 
-    1. Carga la imagen desde disco con PIL (soporta JPG y PNG)
-    2. Redimensiona a 224×224 px (tamaño fijo que espera EfficientNet-B0)
-    3. Convierte a array numérico de numpy
-    4. Agrega la dimensión de batch: (224, 224, 3) → (1, 224, 224, 3)
-    5. Aplica preprocess_input de EfficientNet:
-       resta la media de ImageNet por canal y normaliza los valores
+    1. Carga la imagen desde el archivo temporal
+    2. Convierte a escala de grises y aplica Filtro Bilateral (cv2.bilateralFilter) para eliminar el ruido Speckle del ultrasonido manteniendo los bordes foliculares
+    3. Aplica ecualización adaptativa CLAHE (cv2.createCLAHE) para resaltar contraste en ecografías oscuras
+    4. Redimensiona a 224×224 px (tamaño fijo que espera EfficientNet-B0)
+    5. Agrega dimensión de batch: (224, 224, 3) → (1, 224, 224, 3)
+    6. Aplica preprocess_input de EfficientNet (normalización de canales)
 
-    Retorna un array listo para pasarle directamente al modelo.
+    Retorna un array numpy procesado y limpio listo para el modelo.
     """
-    img = keras_image.load_img(img_path, target_size=(224, 224))  # Carga y redimensiona
-    img_array = keras_image.img_to_array(img)                      # PIL → numpy float32
-    img_array = np.expand_dims(img_array, axis=0)                  # Agrega dimensión de batch
-    img_array = preprocess_input(img_array)                        # Normalización EfficientNet
+    # Leer imagen con OpenCV
+    img_bgr = cv2.imread(img_path)
+    if img_bgr is None:
+        # Fallback con Keras si OpenCV falla
+        img = keras_image.load_img(img_path, target_size=(224, 224))
+        img_array = keras_image.img_to_array(img)
+        img_array = np.expand_dims(img_array, axis=0)
+        return preprocess_input(img_array)
+
+    # 1. Convertir a grises
+    gris = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    # 2. Reducción de ruido Speckle (Filtro Bilateral: d=5, sigmaColor=75, sigmaSpace=75)
+    denoised = cv2.bilateralFilter(gris, d=5, sigmaColor=75, sigmaSpace=75)
+
+    # 3. Realce de contraste CLAHE
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(denoised)
+
+    # 4. Redimensionar a 224x224 px
+    resized = cv2.resize(enhanced, (224, 224), interpolation=cv2.INTER_AREA)
+
+    # 5. Reconvertir a 3 canales RGB para EfficientNet
+    rgb = cv2.cvtColor(resized, cv2.COLOR_GRAY2RGB)
+
+    # 6. Formato numpy y normalización de EfficientNet
+    img_array = np.expand_dims(rgb.astype(np.float32), axis=0)
+    img_array = preprocess_input(img_array)
     return img_array
 
 
@@ -384,27 +408,23 @@ def subir_mapa_calor_storage(mapa_bytes: bytes, nombre_ecografia: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def guardar_estudio(
-    consulta_id:   Optional[str],   # Opcional para pruebas sin BD completa
-    imagen_url:    str,
-    imagen_nombre: str,
-    prob_sop:      float,
-    prob_normal:   float,
-    resultado:     str,
-    num_foliculos: Optional[int] = None,
+    consulta_id:       Optional[str],   # Opcional para pruebas sin BD completa
+    imagen_url:        str,
+    imagen_nombre:     str,
+    prob_sop:          float,
+    prob_normal:       float,
+    resultado:         str,
+    num_foliculos:     Optional[int] = None,
+    num_foliculos_izq: Optional[int] = None,
+    num_foliculos_der: Optional[int] = None,
+    lado_ovario:       Optional[str] = "izquierdo",
 ) -> dict:
     """
     Inserta un nuevo registro en la tabla estudio_ecografico de Supabase.
 
     Guarda el resultado completo del análisis: probabilidades del modelo,
     clasificación (cumple/no cumple criterio), conteo de folículos estimado
-    y la versión del modelo usada.
-
-    El campo 'validado' se inicia en False porque el médico debe
-    revisar y confirmar (o corregir) el resultado antes de que sirva
-    para el reentrenamiento del modelo.
-
-    Retorna:
-        dict: El registro recién creado con todos sus campos, incluido el id generado por Supabase
+    por ovario (Izquierdo / Derecho) y la versión del modelo usada.
     """
     datos = {
         "imagen_url":     imagen_url,
@@ -420,9 +440,16 @@ def guardar_estudio(
     if consulta_id and consulta_id != "None" and consulta_id.strip() != "":
         datos["consulta_id"] = consulta_id
 
-    # Agregar conteo de folículos si se pudo estimar (campo opcional)
-    if num_foliculos is not None:
+    # Asignación diferenciada entre Ovario Izquierdo y Derecho
+    if num_foliculos_izq is not None:
+        datos["num_foliculos_izq"] = num_foliculos_izq
+    elif num_foliculos is not None and lado_ovario == "izquierdo":
         datos["num_foliculos_izq"] = num_foliculos
+
+    if num_foliculos_der is not None:
+        datos["num_foliculos_der"] = num_foliculos_der
+    elif num_foliculos is not None and lado_ovario == "derecho":
+        datos["num_foliculos_der"] = num_foliculos
 
     response = supabase.table("estudio_ecografico").insert(datos).execute()
     return response.data[0]

@@ -11,6 +11,13 @@ __pycache__/
 # Environment variables
 .env
 
+# Datasets pesados de imagenes (entrenamiento offline)
+dataset/
+dataset_original/
+pipelines/efficientnet/dataset/
+pipelines/efficientnet/dataset_original/
+pipelines/efficientnet/dataset_procesado/
+
 # Models & Outputs
 outputs/
 test_images/

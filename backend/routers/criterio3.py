@@ -61,7 +61,8 @@ FORMATOS_PERMITIDOS = {"image/jpeg", "image/png"}
 @router.post("/predecir", response_model=PrediccionResponse)
 async def predecir(
     file: UploadFile = File(...),
-    consulta_id: Optional[UUID] = Form(None),  # Opcional para pruebas sin BD completa
+    consulta_id: Optional[UUID] = Form(None),
+    lado_ovario: Optional[str] = Form("izquierdo"),
 ):
     """
     Recibe una imagen de ecografía ovárica y realiza el análisis completo:
@@ -158,6 +159,7 @@ async def predecir(
             prob_normal=prob_normal,
             resultado=resultado,
             num_foliculos=num_foliculos,
+            lado_ovario=lado_ovario,
         )
     except Exception as e:
         print(f"[WARN] No se guardo en BD (modo prueba sin consulta_id): {e}")
