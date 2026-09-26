@@ -108,27 +108,27 @@ class PrediccionResponse(BaseModel):
 
 class ValidarRequest(BaseModel):
     """
-    Datos que envía el médico cuando revisa y valida el resultado del modelo.
-
-    La etiqueta_real indica el diagnóstico real del médico:
-    - "SOP"    → la imagen muestra morfología de ovario poliquístico
-    - "Normal" → la imagen es de un ovario sin patología
-
-    La observacion_medico es opcional y permite agregar notas clínicas
-    que pueden ser útiles para el reentrenamiento futuro del modelo.
+    Datos que envía el médico cuando revisa, evalúa y confirma la ecografía.
     """
-    # Etiqueta real asignada por el médico (obligatoria)
     etiqueta_real: str = Field(
         ...,
         description="Diagnóstico del médico: 'SOP' o 'Normal'"
     )
-
-    # Observaciones adicionales del médico (opcional, máximo 500 caracteres)
     observacion_medico: Optional[str] = Field(
         None,
         max_length=500,
         description="Notas clínicas del médico sobre esta imagen (opcional)"
     )
+    paciente_id: Optional[str] = None
+    consulta_id: Optional[str] = None
+    imagen_url: Optional[str] = None
+    imagen_nombre: Optional[str] = None
+    prob_sop: Optional[float] = None
+    prob_normal: Optional[float] = None
+    resultado: Optional[str] = None
+    num_foliculos: Optional[int] = None
+    mapa_calor_url: Optional[str] = None
+    lado_ovario: Optional[str] = "izquierdo"
 
     @field_validator("etiqueta_real")
     @classmethod

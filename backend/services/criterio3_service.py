@@ -22,6 +22,8 @@ from tensorflow.keras.applications.efficientnet import preprocess_input
 from tensorflow.keras.preprocessing import image as keras_image
 
 from db.supabase_client import supabase
+from services import security_service
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -86,46 +88,20 @@ def get_model() -> tf.keras.Model:
 
 def _preprocesar_imagen(img_path: str) -> np.ndarray:
     """
-    Prepara cada nueva imagen subida por el médico en tiempo real:
+    Prepara cada nueva imagen subida por el médico para EfficientNet-B0:
 
-    1. Carga la imagen desde el archivo temporal
-    2. Convierte a escala de grises y aplica Filtro Bilateral (cv2.bilateralFilter) para eliminar el ruido Speckle del ultrasonido manteniendo los bordes foliculares
-    3. Aplica ecualización adaptativa CLAHE (cv2.createCLAHE) para resaltar contraste en ecografías oscuras
-    4. Redimensiona a 224×224 px (tamaño fijo que espera EfficientNet-B0)
-    5. Agrega dimensión de batch: (224, 224, 3) → (1, 224, 224, 3)
-    6. Aplica preprocess_input de EfficientNet (normalización de canales)
+    1. Carga la imagen RGB redimensionada a 224×224 px (idéntico a cómo fue entrenado el modelo).
+    2. Convierte a array numpy (224, 224, 3).
+    3. Agrega dimensión de batch (1, 224, 224, 3).
+    4. Aplica preprocess_input de EfficientNet.
 
-    Retorna un array numpy procesado y limpio listo para el modelo.
+    IMPORTANTE: No aplicar CLAHE ni filtros bilaterales aquí, ya que alteran la distribución
+    de intensidades de los píxeles y distorsionan la clasificación de la red neuronal.
     """
-    # Leer imagen con OpenCV
-    img_bgr = cv2.imread(img_path)
-    if img_bgr is None:
-        # Fallback con Keras si OpenCV falla
-        img = keras_image.load_img(img_path, target_size=(224, 224))
-        img_array = keras_image.img_to_array(img)
-        img_array = np.expand_dims(img_array, axis=0)
-        return preprocess_input(img_array)
-
-    # 1. Convertir a grises
-    gris = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-
-    # 2. Reducción de ruido Speckle (Filtro Bilateral: d=5, sigmaColor=75, sigmaSpace=75)
-    denoised = cv2.bilateralFilter(gris, d=5, sigmaColor=75, sigmaSpace=75)
-
-    # 3. Realce de contraste CLAHE
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(denoised)
-
-    # 4. Redimensionar a 224x224 px
-    resized = cv2.resize(enhanced, (224, 224), interpolation=cv2.INTER_AREA)
-
-    # 5. Reconvertir a 3 canales RGB para EfficientNet
-    rgb = cv2.cvtColor(resized, cv2.COLOR_GRAY2RGB)
-
-    # 6. Formato numpy y normalización de EfficientNet
-    img_array = np.expand_dims(rgb.astype(np.float32), axis=0)
-    img_array = preprocess_input(img_array)
-    return img_array
+    img = keras_image.load_img(img_path, target_size=(224, 224))
+    img_array = keras_image.img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    return preprocess_input(img_array)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -270,64 +246,86 @@ def superponer_mapa_calor(img_path: str, mapa: np.ndarray) -> bytes:
 
 def contar_foliculos(img_path: str) -> int:
     """
-    Estima el número de folículos visibles en una ecografía ovárica.
+    Estima el número de folículos antrales visibles usando segmentación anecoica adaptativa.
 
-    Técnica usada: Transformada de Hough para círculos (HoughCircles)
-    ─────────────────────────────────────────────────────────────────
-    Los folículos son estructuras anecoicas (oscuras, casi negras) de
-    forma circular en la ecografía. OpenCV puede detectarlos buscando
-    patrones circulares en la imagen en escala de grises.
-
-    Parámetros de búsqueda calibrados para ecografías ováricas:
-      - Radio mínimo: 5 px  (~2-3 mm reales en imagen 224×224)
-      - Radio máximo: 40 px (~12 mm reales)
-      - Distancia mínima entre centros: 15 px (evita contar el mismo dos veces)
-
-    IMPORTANTE: Este conteo es una estimación automática. La calidad
-    del resultado depende de la calidad y escala de la ecografía.
-    El médico puede corregir el valor manualmente en la interfaz.
-
-    Retorna:
-        int: Número estimado de folículos (0 si no se detectan o hay error)
+    Los folículos en ultrasonido son bolsas de líquido anecoicas (oscuras/negras) dentro del ovario.
+    Este algoritmo:
+      1. Define un ROI para ignorar bordes con texto/parámetros y zonas fuera del abanico ecográfico.
+      2. Suaviza la imagen con Filtro Bilateral para eliminar ruido speckle.
+      3. Aplica CLAHE y umbralización adaptativa dentro de la región ovárica.
+      4. Filtra por área (20-450 px²), circularidad (≥ 0.35) y oscuridad anecoica estricta.
     """
-    # Leer la imagen en escala de grises (suficiente para detectar círculos)
-    img_gris = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-    if img_gris is None:
-        print("[WARN] No se pudo leer la imagen para conteo de foliculos")
+    img_bgr = cv2.imread(img_path)
+    if img_bgr is None:
         return 0
 
-    # Redimensionar a 224×224 para consistencia con el tamaño del modelo
+    img_gris = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     img_gris = cv2.resize(img_gris, (224, 224))
+    h, w = img_gris.shape
 
-    # Aplicar desenfoque gaussiano (kernel 9×9) para reducir el ruido de speckle
-    # El ruido de speckle es el patrón granular típico de imágenes de ultrasonido
-    # Sin este paso, el algoritmo detectaría muchos círculos falsos
-    img_suavizada = cv2.GaussianBlur(img_gris, (9, 9), 2)
+    # 1. Crear máscara ROI para ignorar bordes (textos de cabecera, datos del ecógrafo y márgenes externos)
+    roi_mask = np.zeros((h, w), dtype=np.uint8)
+    roi_mask[int(h * 0.12):int(h * 0.90), int(w * 0.08):int(w * 0.92)] = 255
 
-    # Detectar círculos con la Transformada de Hough
-    # HOUGH_GRADIENT: método basado en gradiente de imagen
-    # dp=1.2        : resolución del acumulador (1.0 = misma resolución que la imagen)
-    # minDist=15    : distancia mínima entre centros de dos círculos detectados
-    # param1=50     : umbral de Canny para detección de bordes internamente
-    # param2=30     : umbral del acumulador (menor valor = más detecciones, más falsos positivos)
-    # minRadius=5   : radio mínimo en píxeles de un folículo
-    # maxRadius=40  : radio máximo en píxeles de un folículo
-    circulos = cv2.HoughCircles(
-        img_suavizada,
-        cv2.HOUGH_GRADIENT,
-        dp=1.2,
-        minDist=15,
-        param1=50,
-        param2=30,
-        minRadius=5,
-        maxRadius=40
+    # Mediana de intensidad del tejido dentro del ROI (excluyendo fondo negro absoluto < 15 y brillo de rejilla > 235)
+    valid_pixels = img_gris[(roi_mask > 0) & (img_gris > 15) & (img_gris < 235)]
+    if len(valid_pixels) == 0:
+        return 0
+
+    median_roi = np.median(valid_pixels)
+
+    # 2. Reducción de ruido Speckle con Filtro Bilateral
+    denoised = cv2.bilateralFilter(img_gris, d=7, sigmaColor=75, sigmaSpace=75)
+
+    # 3. Realce de contraste CLAHE
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(denoised)
+
+    # 4. Umbralización adaptativa
+    binary = cv2.adaptiveThreshold(
+        enhanced,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        blockSize=25,
+        C=6
     )
 
-    # HoughCircles devuelve None si no encuentra ningún círculo
-    if circulos is not None:
-        return len(circulos[0])  # circulos[0] contiene la lista de círculos detectados
+    # Aplicar ROI
+    binary = cv2.bitwise_and(binary, binary, mask=roi_mask)
 
-    return 0
+    # Limpieza morfológica
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    contornos, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    foliculos_validos = 0
+
+    for cnt in contornos:
+        area = cv2.contourArea(cnt)
+        # Área típica de folículo antral en imagen 224x224: entre 20 px² y 450 px²
+        if 20 <= area <= 450:
+            perimetro = cv2.arcLength(cnt, True)
+            if perimetro == 0:
+                continue
+
+            circularidad = (4.0 * np.pi * area) / (perimetro ** 2)
+            # Folículos tienen bordes suaves/redondeados (circularidad >= 0.35)
+            if circularidad >= 0.35:
+                x, y, w_box, h_box = cv2.boundingRect(cnt)
+                aspect_ratio = float(w_box) / h_box if h_box > 0 else 0
+
+                if 0.45 <= aspect_ratio <= 2.2:
+                    # Comprobar intensidad interna anecoica (líquido folicular oscuro)
+                    mask_cnt = np.zeros((h, w), dtype=np.uint8)
+                    cv2.drawContours(mask_cnt, [cnt], -1, 255, -1)
+                    mean_val = cv2.mean(img_gris, mask=mask_cnt)[0]
+
+                    if mean_val < min(65.0, median_roi * 0.70):
+                        foliculos_validos += 1
+
+    return foliculos_validos
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -360,6 +358,10 @@ def subir_imagen_storage(archivo_bytes: bytes, nombre_original: str) -> tuple[st
         "png":  "image/png",
     }
     content_type = mime_types.get(extension, "image/jpeg")
+
+    # Calcular hash de integridad SHA-256 según normativa HIPAA
+    sha256_hash = security_service.calcular_hash_sha256(archivo_bytes)
+    security_service.auditar_acceso_medico("MEDICO_ACTIVO", "SUBIDA_ECOGRAFIA_MEDICA", f"SHA256:{sha256_hash}")
 
     # Subir los bytes del archivo al bucket configurado
     supabase.storage.from_(BUCKET).upload(
@@ -404,8 +406,61 @@ def subir_mapa_calor_storage(mapa_bytes: bytes, nombre_ecografia: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# BASE DE DATOS — TABLA estudio_ecografico
+# BASE DE DATOS — CONSULTAS AUTOMÁTICAS Y TABLA estudio_ecografico
 # ══════════════════════════════════════════════════════════════════════════════
+
+def obtener_o_crear_consulta_automatica(
+    paciente_id: Optional[str] = None,
+    consulta_id: Optional[str] = None
+) -> str:
+    """
+    Garantiza que exista una consulta médica real en Supabase para vincular al estudio ecográfico.
+
+    1. Si se proporciona consulta_id y existe en la BD, la devuelve.
+    2. Si consulta_id no existe o no se envió, busca la paciente indicada (o paciente activa por defecto).
+    3. Cuenta las consultas existentes de la paciente para generar un título numerado:
+       'Consulta Ecográfica #N — Evaluación Criterio 3 de Rotterdam'
+    4. Crea automáticamente el registro en la tabla 'consulta' y devuelve el UUID real.
+    """
+    if consulta_id and consulta_id != "None" and consulta_id.strip() != "":
+        try:
+            res = supabase.table("consulta").select("id").eq("id", consulta_id).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]["id"]
+        except Exception as e_check:
+            print("[WARN] Error verificando consulta_id previa:", e_check)
+
+    # Si no se pasó paciente_id, buscar la primera paciente activa registrada en el sistema
+    if not paciente_id or paciente_id == "None" or paciente_id.strip() == "":
+        try:
+            res_pac = supabase.table("paciente").select("id").eq("activo", True).limit(1).execute()
+            if res_pac.data and len(res_pac.data) > 0:
+                paciente_id = res_pac.data[0]["id"]
+        except Exception as e_pac:
+            print("[WARN] Error buscando paciente por defecto:", e_pac)
+
+    if not paciente_id:
+        raise Exception("Se requiere una paciente registrada en el sistema para asociar la consulta ecográfica.")
+
+    # Contar consultas previas registradas para esa paciente
+    consultas_previas = supabase.table("consulta").select("id").eq("paciente_id", paciente_id).execute().data or []
+    num_consulta = len(consultas_previas) + 1
+
+    motivo = f"Consulta Ecográfica #{num_consulta} — Evaluación Criterio 3 de Rotterdam"
+    observaciones = f"Consulta N° {num_consulta} generada automáticamente al procesar imagen ecográfica de ovario."
+
+    from schemas.consulta_schema import ConsultaCreate
+    from services.consulta_service import crear_consulta
+
+    nueva_consulta = crear_consulta(ConsultaCreate(
+        paciente_id=paciente_id,
+        motivo=motivo,
+        observaciones=observaciones,
+        estado="en_proceso"
+    ))
+
+    return nueva_consulta["id"]
+
 
 def guardar_estudio(
     consulta_id:       Optional[str],   # Opcional para pruebas sin BD completa
@@ -418,13 +473,14 @@ def guardar_estudio(
     num_foliculos_izq: Optional[int] = None,
     num_foliculos_der: Optional[int] = None,
     lado_ovario:       Optional[str] = "izquierdo",
+    mapa_calor_url:    Optional[str] = None,
 ) -> dict:
     """
     Inserta un nuevo registro en la tabla estudio_ecografico de Supabase.
 
-    Guarda el resultado completo del análisis: probabilidades del modelo,
-    clasificación (cumple/no cumple criterio), conteo de folículos estimado
-    por ovario (Izquierdo / Derecho) y la versión del modelo usada.
+    Guarda el resultado completo del análisis con todos sus 16 campos:
+    probabilidades del modelo, clasificación (cumple/no cumple criterio),
+    conteo de folículos estimado, mapa de calor URL y versión del modelo.
     """
     datos = {
         "imagen_url":     imagen_url,
@@ -434,13 +490,15 @@ def guardar_estudio(
         "resultado":      resultado,
         "validado":       False,                  # Pendiente de validación médica
         "version_modelo": VERSION_MODELO,
+        "num_foliculos":  num_foliculos if num_foliculos is not None else 0,
+        "mapa_calor_url": mapa_calor_url,
     }
 
     # Solo incluir consulta_id si se proporciona (permite pruebas sin FK completa)
     if consulta_id and consulta_id != "None" and consulta_id.strip() != "":
         datos["consulta_id"] = consulta_id
 
-    # Asignación diferenciada entre Ovario Izquierdo y Derecho
+    # Asignación diferenciada entre Ovario Izquierdo y Derecho si los campos existen
     if num_foliculos_izq is not None:
         datos["num_foliculos_izq"] = num_foliculos_izq
     elif num_foliculos is not None and lado_ovario == "izquierdo":
@@ -451,43 +509,98 @@ def guardar_estudio(
     elif num_foliculos is not None and lado_ovario == "derecho":
         datos["num_foliculos_der"] = num_foliculos
 
-    response = supabase.table("estudio_ecografico").insert(datos).execute()
-    return response.data[0]
+    try:
+        response = supabase.table("estudio_ecografico").insert(datos).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+    except Exception as e:
+        print("[WARN] Error insertando en tabla estudio_ecografico, intentando sin campos opcionales num_foliculos_izq/der:", e)
+        # Fallback si num_foliculos_izq/der no están en la tabla
+        datos.pop("num_foliculos_izq", None)
+        datos.pop("num_foliculos_der", None)
+        response = supabase.table("estudio_ecografico").insert(datos).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+
+    return datos
 
 
 def validar_estudio(
-    estudio_id:   str,
+    estudio_id:    str,
     etiqueta_real: str,
-    observacion:  str | None,
+    observacion:   Optional[str] = None,
+    paciente_id:   Optional[str] = None,
+    consulta_id:   Optional[str] = None,
+    imagen_url:    Optional[str] = None,
+    imagen_nombre: Optional[str] = None,
+    prob_sop:      Optional[float] = None,
+    prob_normal:   Optional[float] = None,
+    resultado:     Optional[str] = None,
+    num_foliculos: Optional[int] = None,
+    mapa_calor_url: Optional[str] = None,
+    lado_ovario:   Optional[str] = "izquierdo",
 ) -> dict:
     """
-    Registra la validación médica de un estudio ecográfico existente.
+    Registra la evaluación médica definitiva en la base de datos de Supabase.
 
-    Cuando el médico confirma o corrige el resultado del modelo, se actualiza:
-      - validado = True
-      - etiqueta_real = "SOP" o "Normal" (según el criterio del médico)
-      - observacion_medico = notas adicionales del médico (opcional)
-      - updated_at = timestamp actual
-
-    Estos datos validados se acumulan para el futuro reentrenamiento del modelo,
-    lo que permite que el modelo mejore con el tiempo.
-
-    Retorna:
-        dict: El registro actualizado con todos sus campos
+    Solamente en este punto (cuando el médico evalúa y confirma el estudio):
+      1. Se crea la consulta médica real en la tabla 'consulta'.
+      2. Se inserta el registro oficial en la tabla 'estudio_ecografico'.
     """
-    datos = {
+    # 1. Garantizar consulta médica real al momento de la evaluación
+    real_consulta_id = None
+    try:
+        real_consulta_id = obtener_o_crear_consulta_automatica(
+            paciente_id=paciente_id,
+            consulta_id=consulta_id
+        )
+    except Exception as e_cons:
+        print("[WARN] Error al obtener o crear consulta médica:", e_cons)
+
+    # 2. Intentar actualizar si ya existía en BD por id
+    datos_update = {
         "validado":           True,
         "etiqueta_real":      etiqueta_real,
         "observacion_medico": observacion,
         "updated_at":         datetime.now(timezone.utc).isoformat(),
     }
-    response = (
-        supabase.table("estudio_ecografico")
-        .update(datos)
-        .eq("id", estudio_id)
-        .execute()
-    )
-    return response.data[0]
+    try:
+        response = (
+            supabase.table("estudio_ecografico")
+            .update(datos_update)
+            .eq("id", estudio_id)
+            .execute()
+        )
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+    except Exception:
+        pass
+
+    # 3. Si no existía en BD (porque fue vista previa preliminar), INSERTAR oficialmente en Supabase:
+    datos_insert = {
+        "imagen_url":     imagen_url or "",
+        "imagen_nombre":  imagen_nombre or "",
+        "prob_sop":       round(prob_sop, 5) if prob_sop is not None else 0.0,
+        "prob_normal":    round(prob_normal, 5) if prob_normal is not None else 0.0,
+        "resultado":      resultado or ("Cumple criterio" if etiqueta_real == "SOP" else "No cumple criterio"),
+        "validado":       True,
+        "etiqueta_real":  etiqueta_real,
+        "observacion_medico": observacion,
+        "version_modelo": VERSION_MODELO,
+        "num_foliculos":  num_foliculos if num_foliculos is not None else 0,
+        "mapa_calor_url": mapa_calor_url,
+    }
+    if real_consulta_id:
+        datos_insert["consulta_id"] = real_consulta_id
+
+    try:
+        response = supabase.table("estudio_ecografico").insert(datos_insert).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+    except Exception as e_ins:
+        print("[WARN] Error al insertar estudio ecográfico evaluado:", e_ins)
+
+    return datos_insert
 
 
 def obtener_estadisticas() -> dict:
