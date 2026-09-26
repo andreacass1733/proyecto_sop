@@ -13,7 +13,7 @@ BATCH     = 32
 CLASES    = ['Normal', 'SOP']
 
 # ── Cargar el mejor modelo guardado ───────────────────────────────────
-model = load_model('../models/best_fase1.keras')  # ← cambia si usas fase2 o fase3
+model = load_model('../models/best_fase1.keras')  # 
 print("✅ Modelo cargado correctamente")
 
 # ── Generador de test ──────────────────────────────────────────────────
