@@ -13,7 +13,11 @@ def crear_cita(cita: CitaCreate) -> dict:
     if not datos.get("fecha_atencion"):
         datos["fecha_atencion"] = datetime.now(timezone.utc).isoformat()
     elif isinstance(datos["fecha_atencion"], datetime):
-        datos["fecha_atencion"] = datos["fecha_atencion"].isoformat()
+        fecha = datos["fecha_atencion"]
+        # Basic validation (hours 7-19) on backend (using UTC hour could be tricky depending on timezone, so we assume frontend sends the right constraint, but we block exactly past times easily)
+        if fecha < datetime.now(timezone.utc):
+            raise Exception("No se puede agendar una cita en el pasado.")
+        datos["fecha_atencion"] = fecha.isoformat()
         
     res = supabase.table("cita").insert(datos).execute()
     if res.data:
