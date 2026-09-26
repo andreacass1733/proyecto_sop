@@ -46,16 +46,21 @@ def preprocesar_dataset_imagenes_completo():
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     eff_dir = os.path.dirname(script_dir)
+    backend_dir = os.path.abspath(os.path.join(eff_dir, "..", ".."))
     
-    # Origen del dataset original o dataset dividido
-    origen_dir = os.path.join(eff_dir, "dataset")
-    if not os.path.exists(origen_dir):
-        # Si no está en pipelines, buscar en backend raíz
-        origen_dir = r"d:\Andrea\Proyecto\proyecto_sop\backend\dataset"
+    # Origen del dataset original o dataset dividido (con soporte para .env o rutas relativas)
+    env_dataset = os.getenv("DATASET_DIR")
+    if env_dataset and os.path.exists(env_dataset):
+        origen_dir = os.path.abspath(env_dataset)
+    elif os.path.exists(os.path.join(eff_dir, "dataset")):
+        origen_dir = os.path.join(eff_dir, "dataset")
+    else:
+        origen_dir = os.path.join(backend_dir, "dataset")
 
     destino_dir = os.path.join(eff_dir, "dataset_procesado")
     
-    print(f"[INFO] Iniciando preprocesamiento avanzado de imágenes (70% Tarea 2)...")
+    print(f"[INFO] Iniciando preprocesamiento avanzado de imágenes (EfficientNet)...")
+
     print(f" Origen:  {origen_dir}")
     print(f" Destino: {destino_dir}")
 
