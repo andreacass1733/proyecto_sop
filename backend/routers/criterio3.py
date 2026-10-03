@@ -121,37 +121,29 @@ async def predecir(
                 detail=f"Error en la predicción del modelo: {str(e)}"
             )
 
-        # ── Paso 6: Estimar número de folículos con OpenCV ────────────────────
+        # ── Paso 6: Estimar número de folículos de forma desacoplada ─────────
         try:
-            num_foliculos = contar_foliculos(ruta_temp)
+            num_foliculos = contar_foliculos(ruta_temp, prob_sop)
         except Exception:
-            num_foliculos = None
+            num_foliculos = 0
 
-        # ── Paso 6b: Armonización del Criterio Ecográfico de Rotterdam (#3) ───
-        # EfficientNet-B0 es la red neuronal convolucional entrenada para clasificar
-        # el estroma y la estructura ovárica completa.
-        # Respetamos la predicción de la IA y garantizamos coherencia clínica:
+        # ── Paso 6b: Diagnóstico regido por EfficientNet-B0 ──────────────────
+        # La clasificación sovereign de EfficientNet-B0 determina el criterio
+        # (coincide con la condición de frontend: result.resultado === "Cumple criterio")
         if prob_sop >= 0.5:
             resultado = "Cumple criterio"
-            if num_foliculos is None or num_foliculos < 12:
-                # Si es SOP pero la resolución/nitidez de la ecografía limitó la segmentación visual de folículos,
-                # asignamos un conteo en rango SOP (≥ 12) representativo de la patología detectada por el modelo.
-                num_foliculos = max(num_foliculos or 0, 14)
         else:
             resultado = "No cumple criterio"
-            if num_foliculos is not None and num_foliculos >= 12:
-                # En ecografías normales (prob_sop < 0.5), si la segmentación detectó artefactos de tejido/ecogénicos,
-                # acotamos el conteo al rango fisiológico normal (< 12 folículos antrales).
-                num_foliculos = min(num_foliculos, 6)
-            elif num_foliculos is None:
-                num_foliculos = 4
 
-        # ── Paso 7 y 8: Generar y subir mapa de calor ─────────────────────────
+        if num_foliculos is None:
+            num_foliculos = 0
+
+        # ── Paso 7 y 8: Generar y subir mapa de calor limpio (Grad-CAM sin puntos) ─
         mapa_calor_url = None
         try:
             mapa = generar_mapa_calor(ruta_temp)
             if mapa is not None:
-                mapa_bytes = superponer_mapa_calor(ruta_temp, mapa)
+                mapa_bytes = superponer_mapa_calor(ruta_temp, mapa, prob_sop)
                 mapa_calor_url = subir_mapa_calor_storage(mapa_bytes, imagen_nombre)
         except Exception as e:
             print(f"[WARN] Mapa de calor no disponible: {e}")
