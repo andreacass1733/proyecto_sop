@@ -95,8 +95,15 @@ class PrediccionResponse(BaseModel):
     @field_validator("resultado")
     @classmethod
     def validar_resultado(cls, v: str) -> str:
-        """Garantiza que el resultado solo pueda ser uno de los dos valores válidos."""
-        valores_validos = {"Cumple criterio", "No cumple criterio"}
+        """Permite varios valores descriptivos de resultado.
+        Incluye los valores originales y los ampliados para SOP y Normal.
+        """
+        valores_validos = {
+            "Cumple criterio",
+            "No cumple criterio",
+            "Cumple criterio SOP",
+            "Normal (Fisiológico: < 12 folículos)"
+        }
         if v not in valores_validos:
             raise ValueError(f"resultado debe ser uno de: {valores_validos}")
         return v

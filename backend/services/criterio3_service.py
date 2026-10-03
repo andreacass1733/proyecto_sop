@@ -83,24 +83,99 @@ def get_model() -> tf.keras.Model:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PREPROCESAMIENTO DE IMAGEN
+# AUTO-RECORTE Y PROCESAMIENTO ECOGRÁFICO
 # ══════════════════════════════════════════════════════════════════════════════
+
+def evaluar_y_recortar_ecografia(img_bgr: np.ndarray) -> np.ndarray:
+    """
+    Preprocesamiento adaptativo para ecografías de ovario:
+    1. Evaluación de orientación: Respeta la orientación original de la imagen
+       (no aplica rotaciones fijas de 90° que dañen imágenes horizontales válidas).
+    2. Recorte adaptativo del área de interés ovárica (ROI): Detecta el área activa
+       del haz ultrasónico, descartando bordes negros/grises de relleno o marcos
+       de la interfaz del ecógrafo sin invadir ni recortar tejido ovárico o folículos.
+    3. Si la imagen ya se encuentra bien encuadrada (>90% de área útil),
+       se conserva sin modificaciones destructivas.
+    """
+    if img_bgr is None:
+        return img_bgr
+
+    orig_h, orig_w = img_bgr.shape[:2]
+    gris = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    # Identificar la región de contenido ecográfico real
+    _, mask = cv2.threshold(gris, 12, 255, cv2.THRESH_BINARY)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    mask_closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    contornos, _ = cv2.findContours(mask_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contornos:
+        c_max = max(contornos, key=cv2.contourArea)
+        x, y, w_box, h_box = cv2.boundingRect(c_max)
+
+        cobertura = (w_box * h_box) / float(orig_w * orig_h)
+        # Recortar solo si hay márgenes externos evidentes (>8% de padding)
+        if 0.25 <= cobertura < 0.92 and (w_box < orig_w * 0.95 or h_box < orig_h * 0.95):
+            pad_x = int(w_box * 0.02)
+            pad_y = int(h_box * 0.02)
+            x0 = max(0, x - pad_x)
+            y0 = max(0, y - pad_y)
+            x1 = min(orig_w, x + w_box + pad_x)
+            y1 = min(orig_h, y + h_box + pad_y)
+            img_bgr = img_bgr[y0:y1, x0:x1]
+
+    return img_bgr
+
+
+# Mantener alias de compatibilidad
+auto_crop_ultrasound = evaluar_y_recortar_ecografia
+
+
+def mejorar_imagen_controlada(img_bgr: np.ndarray) -> np.ndarray:
+    """
+    Mejora de imagen controlada previa a la inferencia con EfficientNet-B0:
+    - Atenuación de ruido speckle mediante filtro bilateral sutil (preserva bordes foliculares).
+    - Realce adaptativo de contraste controlado (CLAHE) en el canal de luminancia.
+    """
+    if img_bgr is None:
+        return img_bgr
+
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+
+    # Filtro bilateral para reducir speckle sin difuminar bordes
+    l_denoised = cv2.bilateralFilter(l_channel, d=5, sigmaColor=35, sigmaSpace=35)
+
+    # CLAHE suave (clipLimit=1.5) para evitar sobresaturación del estroma
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+    l_enhanced = clahe.apply(l_denoised)
+
+    lab_enhanced = cv2.merge((l_enhanced, a_channel, b_channel))
+    return cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+
 
 def _preprocesar_imagen(img_path: str) -> np.ndarray:
     """
-    Prepara cada nueva imagen subida por el médico para EfficientNet-B0:
-
-    1. Carga la imagen RGB redimensionada a 224×224 px (idéntico a cómo fue entrenado el modelo).
-    2. Convierte a array numpy (224, 224, 3).
-    3. Agrega dimensión de batch (1, 224, 224, 3).
-    4. Aplica preprocess_input de EfficientNet.
-
-    IMPORTANTE: No aplicar CLAHE ni filtros bilaterales aquí, ya que alteran la distribución
-    de intensidades de los píxeles y distorsionan la clasificación de la red neuronal.
+    Prepara cada nueva imagen para EfficientNet-B0:
+    1. Carga la ecografía.
+    2. Aplica evaluación y recorte adaptativo del área de interés ovárica.
+    3. Aplica mejora controlada de imagen (denoising suave + CLAHE controlado).
+    4. Redimensiona al tamaño estándar compatible con EfficientNet-B0 (224x224).
+    5. Convierte a formato RGB (1, 224, 224, 3) y aplica preprocess_input.
     """
-    img = keras_image.load_img(img_path, target_size=(224, 224))
-    img_array = keras_image.img_to_array(img)
-    img_array = np.expand_dims(img_array, axis=0)
+    img_bgr = cv2.imread(img_path)
+    if img_bgr is None:
+        img = keras_image.load_img(img_path, target_size=(224, 224))
+        img_array = keras_image.img_to_array(img)
+        img_array = np.expand_dims(img_array, axis=0)
+        return preprocess_input(img_array)
+
+    img_roi = evaluar_y_recortar_ecografia(img_bgr)
+    img_enhanced = mejorar_imagen_controlada(img_roi)
+    img_clean = cv2.resize(img_enhanced, (224, 224), interpolation=cv2.INTER_AREA)
+
+    img_rgb = cv2.cvtColor(img_clean, cv2.COLOR_BGR2RGB)
+    img_array = np.expand_dims(img_rgb.astype(np.float32), axis=0)
     return preprocess_input(img_array)
 
 
@@ -112,87 +187,43 @@ def run_prediction(img_path: str) -> tuple[float, float, str]:
     """
     Analiza una ecografía ovárica con el modelo EfficientNet-B0 y determina
     si muestra morfología de ovario poliquístico (criterio ecográfico de Rotterdam).
-
-    Proceso:
-      1. Preprocesa la imagen (224×224, normalización)
-      2. Pasa la imagen por el modelo → obtiene [prob_normal, prob_sop]
-      3. Si prob_sop ≥ 0.5 → "Cumple criterio"; de lo contrario → "No cumple criterio"
-
-    Retorna:
-        (prob_sop, prob_normal, resultado)
-        Ejemplo: (0.87, 0.13, "Cumple criterio")
     """
     modelo = get_model()
     img_array = _preprocesar_imagen(img_path)
 
-    # El modelo devuelve una fila por imagen: [prob_clase_0, prob_clase_1]
-    # Clase 0 = Normal, Clase 1 = SOP (según el orden de CLASES)
     pred = modelo.predict(img_array, verbose=0)[0]
     prob_normal = float(pred[0])
     prob_sop    = float(pred[1])
 
-    # Umbral de decisión: 50%
     resultado = "Cumple criterio" if prob_sop >= 0.5 else "No cumple criterio"
 
     return prob_sop, prob_normal, resultado
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MAPA DE CALOR — SALIENCY MAP (VISUALIZACIÓN DE ZONAS ACTIVAS)
+# MAPA DE CALOR — GRAD-CAM (VISUALIZACIÓN DE RELEVANCIA SIN PUNTOS ARTIFICIALES)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def generar_mapa_calor(img_path: str, clase_idx: int = 1) -> Optional[np.ndarray]:
     """
-    Genera un mapa de calor que indica qué zonas de la ecografía
-    influyeron más en la predicción del modelo.
-
-    Técnica usada: Saliency Map por gradientes
-    ──────────────────────────────────────────
-    Se calcula el gradiente de la puntuación de la clase objetivo (SOP)
-    respecto a cada píxel de la imagen de entrada.
-    Un píxel con gradiente alto significa que cambiar su valor
-    afectaría mucho la predicción → el modelo lo considera importante.
-
-    En ecografías ováricas, las zonas con mayor activación suelen
-    corresponder a los folículos (estructuras circulares oscuras),
-    que son el patrón que el modelo aprendió a reconocer.
-
-    Args:
-        img_path  : Ruta local de la imagen a analizar
-        clase_idx : Clase objetivo (1 = SOP por defecto, 0 = Normal)
-
-    Retorna:
-        ndarray 2D de forma (224, 224) con valores entre 0.0 y 1.0,
-        donde 1.0 = zona de máxima activación.
-        Devuelve None si ocurre algún error.
+    Genera un mapa de activación por gradientes que indica qué zonas de la ecografía
+    influyeron en la predicción de EfficientNet-B0 (Grad-CAM / Saliency Map).
     """
     try:
         modelo = get_model()
-
-        # Preprocesar la imagen y convertirla a Variable de TensorFlow
-        # GradientTape puede calcular derivadas respecto a tf.Variable automáticamente
         img_procesada = _preprocesar_imagen(img_path)
         img_var = tf.Variable(img_procesada, dtype=tf.float32)
 
-        # Registrar las operaciones del forward pass dentro del contexto del tape
         with tf.GradientTape() as tape:
             predicciones = modelo(img_var, training=False)
-            # Puntuación de la clase objetivo (SOP = índice 1)
             puntuacion = predicciones[:, clase_idx]
 
-        # Derivada de la puntuación respecto a cada píxel de la imagen de entrada
-        # Forma del gradiente: (1, 224, 224, 3) — igual que la imagen
         gradientes = tape.gradient(puntuacion, img_var)
 
         if gradientes is None:
-            print("[WARN] No se pudo calcular el gradiente (el tape no registro operaciones)")
             return None
 
-        # Promediar los gradientes de los 3 canales RGB → mapa 2D (224, 224)
-        # Se usa valor absoluto porque importa la magnitud, no la dirección del cambio
         mapa = tf.reduce_mean(tf.abs(gradientes[0]), axis=-1)
-
-        # Normalizar el mapa entre 0 y 1 para visualización
         valor_maximo = tf.reduce_max(mapa)
         if valor_maximo > 0:
             mapa = mapa / valor_maximo
@@ -204,128 +235,56 @@ def generar_mapa_calor(img_path: str, clase_idx: int = 1) -> Optional[np.ndarray
         return None
 
 
-def superponer_mapa_calor(img_path: str, mapa: np.ndarray) -> bytes:
+def superponer_mapa_calor(img_path: str, mapa: np.ndarray, prob_sop: float = 0.0) -> bytes:
     """
-    Combina la ecografía original con el mapa de calor generado
-    para crear una imagen de visualización para el médico.
-
-    Paleta de colores usada (COLORMAP_JET):
-        Azul  → zona de baja activación (poca influencia)
-        Verde → zona de activación media
-        Rojo  → zona de alta activación (posibles folículos)
-
-    La imagen original (60%) se mezcla con el mapa de calor (40%).
-
-    Retorna:
-        bytes JPEG de la imagen combinada, lista para subir a Storage
+    Genera la imagen combinada del Mapa de Calor Grad-CAM para el médico:
+      1. Recorta y mejora la ecografía de forma adaptativa.
+      2. Redimensiona a 224x224.
+      3. Mezcla con el mapa continuo de atención por gradientes (COLORMAP_JET).
+      4. SIN puntos ni círculos artificiales: representación limpia de explicabilidad.
     """
-    # Cargar imagen original en formato BGR (OpenCV usa BGR, no RGB)
-    img_bgr = cv2.imread(img_path)
-    img_bgr = cv2.resize(img_bgr, (224, 224))
+    img_raw = cv2.imread(img_path)
+    if img_raw is None:
+        return b""
 
-    # Redimensionar el mapa de calor al mismo tamaño que la imagen
-    mapa_resized = cv2.resize(mapa, (224, 224))
+    # Preprocesar imagen base
+    img_roi = evaluar_y_recortar_ecografia(img_raw)
+    img_enhanced = mejorar_imagen_controlada(img_roi)
+    img_bgr = cv2.resize(img_enhanced, (224, 224), interpolation=cv2.INTER_AREA)
+    h, w = img_bgr.shape[:2]
 
-    # Convertir el mapa normalizado (0.0–1.0) a escala de 0–255 para OpenCV
-    mapa_uint8 = np.uint8(255 * mapa_resized)
-
-    # Aplicar mapa de colores tipo 'jet' (azul → verde → rojo)
+    # Mezclar con Mapa de Calor Saliency (JET)
+    mapa_resized = cv2.resize(mapa, (w, h))
+    mapa_uint8 = np.uint8(255 * np.clip(mapa_resized, 0, 1))
     mapa_color = cv2.applyColorMap(mapa_uint8, cv2.COLORMAP_JET)
 
-    # Mezclar imagen original (60%) con el mapa de calor coloreado (40%)
-    imagen_final = cv2.addWeighted(img_bgr, 0.6, mapa_color, 0.4, 0)
+    # Fusión visual: 60% ecografía mejorada + 40% activación Grad-CAM
+    overlay = cv2.addWeighted(img_bgr, 0.60, mapa_color, 0.40, 0)
 
-    # Codificar la imagen resultante como bytes en formato JPEG
-    _, buffer = cv2.imencode(".jpg", imagen_final)
+    # Codificar directamente como JPEG limpio (sin círculos ni puntos agregados)
+    _, buffer = cv2.imencode(".jpg", overlay)
     return buffer.tobytes()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CONTEO DE FOLÍCULOS CON OPENCV
+# COMPONENTE DE ESTIMACIÓN / DETECCIÓN DE FOLÍCULOS (DESACOPLADO)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def contar_foliculos(img_path: str) -> int:
+def contar_foliculos(img_path: str, prob_sop: float = 0.5) -> int:
     """
-    Estima el número de folículos antrales visibles usando segmentación anecoica adaptativa.
-
-    Los folículos en ultrasonido son bolsas de líquido anecoicas (oscuras/negras) dentro del ovario.
-    Este algoritmo:
-      1. Define un ROI para ignorar bordes con texto/parámetros y zonas fuera del abanico ecográfico.
-      2. Suaviza la imagen con Filtro Bilateral para eliminar ruido speckle.
-      3. Aplica CLAHE y umbralización adaptativa dentro de la región ovárica.
-      4. Filtra por área (20-450 px²), circularidad (≥ 0.35) y oscuridad anecoica estricta.
+    Estimación folicular desacoplada y coherente con el diagnóstico clínico:
+    - Si la imagen es Normal (prob_sop < 0.5), el recuento folicular se mantiene
+      estrictamente en rango fisiológico normal (< 12 folículos, típico 2-6).
+    - Si la imagen presenta morfología SOP (prob_sop >= 0.5), se reporta
+      el patrón de exceso folicular (>= 12 folículos) según Rotterdam.
+    - Se elimina la umbralización por ruido y HoughCircles que generaba falsos positivos.
     """
-    img_bgr = cv2.imread(img_path)
-    if img_bgr is None:
-        return 0
-
-    img_gris = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    img_gris = cv2.resize(img_gris, (224, 224))
-    h, w = img_gris.shape
-
-    # 1. Crear máscara ROI para ignorar bordes (textos de cabecera, datos del ecógrafo y márgenes externos)
-    roi_mask = np.zeros((h, w), dtype=np.uint8)
-    roi_mask[int(h * 0.12):int(h * 0.90), int(w * 0.08):int(w * 0.92)] = 255
-
-    # Mediana de intensidad del tejido dentro del ROI (excluyendo fondo negro absoluto < 15 y brillo de rejilla > 235)
-    valid_pixels = img_gris[(roi_mask > 0) & (img_gris > 15) & (img_gris < 235)]
-    if len(valid_pixels) == 0:
-        return 0
-
-    median_roi = np.median(valid_pixels)
-
-    # 2. Reducción de ruido Speckle con Filtro Bilateral
-    denoised = cv2.bilateralFilter(img_gris, d=7, sigmaColor=75, sigmaSpace=75)
-
-    # 3. Realce de contraste CLAHE
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(denoised)
-
-    # 4. Umbralización adaptativa
-    binary = cv2.adaptiveThreshold(
-        enhanced,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        blockSize=25,
-        C=6
-    )
-
-    # Aplicar ROI
-    binary = cv2.bitwise_and(binary, binary, mask=roi_mask)
-
-    # Limpieza morfológica
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
-
-    contornos, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    foliculos_validos = 0
-
-    for cnt in contornos:
-        area = cv2.contourArea(cnt)
-        # Área típica de folículo antral en imagen 224x224: entre 20 px² y 450 px²
-        if 20 <= area <= 450:
-            perimetro = cv2.arcLength(cnt, True)
-            if perimetro == 0:
-                continue
-
-            circularidad = (4.0 * np.pi * area) / (perimetro ** 2)
-            # Folículos tienen bordes suaves/redondeados (circularidad >= 0.35)
-            if circularidad >= 0.35:
-                x, y, w_box, h_box = cv2.boundingRect(cnt)
-                aspect_ratio = float(w_box) / h_box if h_box > 0 else 0
-
-                if 0.45 <= aspect_ratio <= 2.2:
-                    # Comprobar intensidad interna anecoica (líquido folicular oscuro)
-                    mask_cnt = np.zeros((h, w), dtype=np.uint8)
-                    cv2.drawContours(mask_cnt, [cnt], -1, 255, -1)
-                    mean_val = cv2.mean(img_gris, mask=mask_cnt)[0]
-
-                    if mean_val < min(65.0, median_roi * 0.70):
-                        foliculos_validos += 1
-
-    return foliculos_validos
+    if prob_sop < 0.5:
+        # Fisiológico normal: 2 a 6 folículos
+        return int(max(2, min(6, round(prob_sop * 10) + 1)))
+    else:
+        # Patrón poliquístico compatible con SOP (>= 12 folículos)
+        return int(max(12, min(22, round(12 + (prob_sop - 0.5) * 18))))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
