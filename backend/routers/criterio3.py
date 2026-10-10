@@ -31,7 +31,9 @@ from schemas.criterio3_schema import (
     ValidarRequest,
 )
 from services.criterio3_service import (
+    clasificar_foliculos_por_tipo,
     contar_foliculos,
+    evaluar_y_recortar_ecografia,
     generar_mapa_calor,
     guardar_estudio,
     obtener_estadisticas,
@@ -44,6 +46,7 @@ from services.criterio3_service import (
     UMBRAL_REENTRENAMIENTO,
     VERSION_MODELO,
 )
+
 from db.supabase_client import supabase
 
 # Nombre del router y prefijo de URL para todas las rutas de este criterio
@@ -90,27 +93,42 @@ async def predecir(
             detail=f"Formato no permitido: '{file.content_type}'. Use JPG o PNG.",
         )
 
-    # ── Paso 2: Leer todos los bytes de la imagen en memoria ──────────────────
+    # ── Paso 2: Leer los bytes de la imagen y aplicar preprocesamiento temprano ──
     contenido = await file.read()
 
-    # ── Paso 3: Subir ecografía original a Supabase Storage ───────────────────
+    # Aplicar corrección de rotación y auto-recorte de bordes blancos/grises inmediatamente
     try:
-        imagen_url, imagen_nombre = subir_imagen_storage(contenido, file.filename)
+        nparr = np.frombuffer(contenido, np.uint8)
+        img_raw = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img_raw is not None:
+            img_clean = evaluar_y_recortar_ecografia(img_raw)
+            _, img_encoded = cv2.imencode(".jpg", img_clean, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            contenido_procesado = img_encoded.tobytes()
+        else:
+            contenido_procesado = contenido
+    except Exception as e_prep:
+        print("[WARN] Preprocesamiento inicial omitido:", e_prep)
+        contenido_procesado = contenido
+
+    # ── Paso 3: Subir ecografía PREPROCESADA y LIMPIA a Supabase Storage ───────
+    try:
+        imagen_url, imagen_nombre = subir_imagen_storage(contenido_procesado, file.filename)
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Error al subir la imagen a Storage: {str(e)}"
         )
 
-    # ── Paso 4: Crear archivo temporal en disco para procesar con OpenCV/TF ───
+    # ── Paso 4: Crear archivo temporal con la ecografía preprocesada ───────────
     extension = file.filename.split(".")[-1].lower()
     archivo_temp = None
     try:
         with tempfile.NamedTemporaryFile(
             suffix=f".{extension}", delete=False
         ) as tmp:
-            tmp.write(contenido)
+            tmp.write(contenido_procesado)
             ruta_temp = tmp.name
+
 
         # ── Paso 5: Predicción con EfficientNet-B0 ────────────────────────────
         try:
@@ -121,24 +139,24 @@ async def predecir(
                 detail=f"Error en la predicción del modelo: {str(e)}"
             )
 
-        # ── Paso 6: Estimar número de folículos de forma desacoplada ─────────
+        # ── Paso 6: Estimación folicular dinámica basada en contornos reales ─────
         try:
-            num_foliculos = contar_foliculos(ruta_temp, prob_sop)
-        except Exception:
-            num_foliculos = 0
+            num_foliculos  = contar_foliculos(ruta_temp, prob_sop)
+            info_foliculos = clasificar_foliculos_por_tipo(prob_sop, num_detectados=num_foliculos)
+        except Exception as e_fol:
+            print("[WARN] Error calculando folículos:", e_fol)
+            info_foliculos = {"antrales_pequenos": 0, "dominante": 0, "total": 0,
+                              "patron": "desconocido", "descripcion": ""}
+            num_foliculos  = 0
 
-        # ── Paso 6b: Diagnóstico regido por EfficientNet-B0 ──────────────────
-        # La clasificación sovereign de EfficientNet-B0 determina el criterio
-        # (coincide con la condición de frontend: result.resultado === "Cumple criterio")
+
+        # ── Paso 6b: Diagnóstico regido exclusivamente por EfficientNet-B0 ────
         if prob_sop >= 0.5:
             resultado = "Cumple criterio"
         else:
             resultado = "No cumple criterio"
 
-        if num_foliculos is None:
-            num_foliculos = 0
-
-        # ── Paso 7 y 8: Generar y subir mapa de calor limpio (Grad-CAM sin puntos) ─
+        # ── Paso 7 y 8: Grad-CAM con envoltorios foliculares anatómicos ────────
         mapa_calor_url = None
         try:
             mapa = generar_mapa_calor(ruta_temp)
@@ -155,10 +173,8 @@ async def predecir(
             os.remove(ruta_temp)
 
     # ── Paso 9: Devolver informe de evaluación preliminar al médico ─────────
-    # La inserción oficial en la BD (consulta + estudio_ecografico) ocurrirá únicamente
-    # cuando el médico revise los resultados y presione "Confirmar Diagnóstico".
     draft_id = uuid.uuid4()
-    
+
     return PrediccionResponse(
         id=draft_id,
         consulta_id=consulta_id if consulta_id else draft_id,
@@ -169,7 +185,11 @@ async def predecir(
         prob_sop_porcentaje=round(prob_sop * 100, 2),
         prob_normal_porcentaje=round(prob_normal * 100, 2),
         resultado=resultado,
-        num_foliculos=num_foliculos if num_foliculos is not None else 0,
+        num_foliculos=num_foliculos,
+        foliculos_antrales_pequenos=info_foliculos.get("antrales_pequenos", 0),
+        foliculos_dominante=info_foliculos.get("dominante", 0),
+        patron_folicular=info_foliculos.get("patron", "fisiologico"),
+        descripcion_folicular=info_foliculos.get("descripcion", ""),
         mapa_calor_url=mapa_calor_url or imagen_url,
         version_modelo=VERSION_MODELO,
         created_at=datetime.now(timezone.utc),
