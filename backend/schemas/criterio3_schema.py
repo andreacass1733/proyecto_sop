@@ -44,69 +44,60 @@ class PrediccionResponse(BaseModel):
     una ecografía con el modelo EfficientNet-B0.
 
     Incluye:
-    - Probabilidades de cada clase (SOP vs Normal) en valores 0-1 y en porcentaje
-    - Resultado de la clasificación ("Cumple criterio" / "No cumple criterio")
-    - Estimación del número de folículos detectados por OpenCV
-    - URL del mapa de calor generado para visualización del médico
-    - URL de la imagen original subida a Supabase Storage
+    - Probabilidades de cada clase (SOP vs Normal) en valores 0-1 y en porcentaje.
+    - Resultado de la clasificación ('Cumple criterio' / 'No cumple criterio').
+    - Desglose folicular por tipo clínico (antrales pequeños 2-9 mm, dominante).
+    - Patrón ecográfico detectado y descripción clínica.
+    - URL del mapa Grad-CAM con envoltorios anatómicos de folículos.
+    - URL de la imagen original subida a Supabase Storage.
     """
-    # Identificador único del registro creado en Supabase
-    id: Optional[UUID] = None
-
-    # ID de la consulta médica a la que pertenece este estudio
-    consulta_id: Optional[UUID] = None
-
-    # URL pública de la imagen en Supabase Storage
-    imagen_url: str
-
-    # Nombre del archivo guardado en Storage (con UUID para evitar colisiones)
+    id:            Optional[UUID] = None
+    consulta_id:   Optional[UUID] = None
+    imagen_url:    str
     imagen_nombre: str
 
-    # Probabilidades como valor decimal entre 0 y 1
-    prob_sop:    float = Field(..., ge=0.0, le=1.0, description="Probabilidad de SOP (0 a 1)")
-    prob_normal: float = Field(..., ge=0.0, le=1.0, description="Probabilidad de Normal (0 a 1)")
+    prob_sop:    float = Field(..., ge=0.0, le=1.0)
+    prob_normal: float = Field(..., ge=0.0, le=1.0)
+    prob_sop_porcentaje:    float
+    prob_normal_porcentaje: float
 
-    # Las mismas probabilidades expresadas como porcentaje (más legible para el médico)
-    prob_sop_porcentaje:    float = Field(..., description="Probabilidad de SOP en porcentaje")
-    prob_normal_porcentaje: float = Field(..., description="Probabilidad de Normal en porcentaje")
-
-    # Clasificación final del modelo
     resultado: str = Field(..., description="'Cumple criterio' o 'No cumple criterio'")
 
-    # Estimación automática de folículos (puede ser None si OpenCV no pudo detectar)
+    # ── Desglose folicular por tipo clínico (Rotterdam + biología folicular) ──
     num_foliculos: Optional[int] = Field(
         None,
-        description="Número estimado de folículos detectados por OpenCV. El médico puede corregirlo."
+        description="Total de folículos estimados (antrales + dominante)."
     )
-
-    # URL del mapa de calor (saliency map) generado para visualización
-    # Puede ser None si la generación del mapa falló (no bloquea el análisis principal)
-    mapa_calor_url: Optional[str] = Field(
+    foliculos_antrales_pequenos: Optional[int] = Field(
         None,
-        description="URL del mapa de calor en Storage. None si no se pudo generar."
+        description="Folículos antrales 2-9 mm. En SOP: ≥12 (criterio Rotterdam). En Normal: 2-6."
+    )
+    foliculos_dominante: Optional[int] = Field(
+        None,
+        description="Folículo dominante 18-24 mm. Ausente en SOP (anovulación). Presente en Normal."
+    )
+    patron_folicular: Optional[str] = Field(
+        None,
+        description="'collar_de_perlas' (SOP) o 'fisiologico' (Normal)."
+    )
+    descripcion_folicular: Optional[str] = Field(
+        None,
+        description="Descripción clínica del patrón folicular detectado."
     )
 
-    # Versión del modelo que generó esta predicción (para trazabilidad)
-    version_modelo: str
-
-    # Fecha y hora en que se creó el registro en la base de datos
-    created_at: datetime
+    mapa_calor_url:  Optional[str] = None
+    version_modelo:  str
+    created_at:      datetime
 
     @field_validator("resultado")
     @classmethod
     def validar_resultado(cls, v: str) -> str:
-        """Permite varios valores descriptivos de resultado.
-        Incluye los valores originales y los ampliados para SOP y Normal.
-        """
-        valores_validos = {
-            "Cumple criterio",
-            "No cumple criterio",
-            "Cumple criterio SOP",
-            "Normal (Fisiológico: < 12 folículos)"
-        }
+        """Solo acepta los dos valores canónicos que produce EfficientNet-B0."""
+        valores_validos = {"Cumple criterio", "No cumple criterio"}
         if v not in valores_validos:
             raise ValueError(f"resultado debe ser uno de: {valores_validos}")
         return v
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
