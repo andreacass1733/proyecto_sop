@@ -97,7 +97,7 @@ def post_paciente(body: PacienteCreate):
         if "duplicate" in error_str.lower() or "unique" in error_str.lower():
             raise HTTPException(
                 status_code=409,
-                detail="Ya existe un paciente con esa Cédula de Identidad (CI)."
+                detail="Ya existe una paciente con ese CI"
             )
         raise HTTPException(status_code=500, detail=error_str)
 

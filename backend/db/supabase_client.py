@@ -14,3 +14,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     )
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def get_supabase_admin_client() -> Client:
+    """Retorna un cliente limpio con service_role sin contaminación de sesión."""
+    return create_client(SUPABASE_URL, SUPABASE_KEY)

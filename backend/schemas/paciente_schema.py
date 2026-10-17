@@ -11,7 +11,7 @@ from datetime import date, datetime
 from typing import Optional, Union
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -29,6 +29,13 @@ class PacienteCreate(BaseModel):
     email: Optional[str] = Field(None, max_length=150)
     medico_id: Optional[UUID] = Field(None, description="ID del médico tratante")
 
+    @field_validator("fecha_nacimiento")
+    @classmethod
+    def validar_fecha_no_futura(cls, v):
+        if v is not None and v > date.today():
+            raise ValueError("La fecha de nacimiento no puede ser una fecha futura.")
+        return v
+
 
 class PacienteUpdate(BaseModel):
     """Datos editables de un paciente (todos opcionales)."""
@@ -41,6 +48,13 @@ class PacienteUpdate(BaseModel):
     email: Optional[str] = Field(None, max_length=150)
     medico_id: Optional[UUID] = None
     activo: Optional[bool] = None
+
+    @field_validator("fecha_nacimiento")
+    @classmethod
+    def validar_fecha_no_futura(cls, v):
+        if v is not None and v > date.today():
+            raise ValueError("La fecha de nacimiento no puede ser una fecha futura.")
+        return v
 
 
 class PacienteOut(BaseModel):
@@ -55,6 +69,7 @@ class PacienteOut(BaseModel):
     email: Optional[str] = None
     medico_id: Optional[UUID] = None
     activo: bool
+    historial: Optional[Union[dict, list]] = None
     created_at: datetime
     updated_at: datetime
 
@@ -178,3 +193,25 @@ class AntecedentesOut(BaseModel):
     historial: Optional[Union[dict, list]] = None
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def inferir_iniciada_vida_sexual(cls, data):
+        if isinstance(data, dict):
+            tiene_obs = any(
+                (data.get(k) or 0) > 0
+                for k in ["gestas", "partos", "cesareas", "abortos", "hijos_vivos"]
+            )
+            meta_sex = False
+            hist = data.get("historial")
+            if isinstance(hist, list):
+                for h in hist:
+                    if isinstance(h, dict) and "__iniciada_vida_sexual__" in h:
+                        meta_sex = bool(h["__iniciada_vida_sexual__"])
+            elif isinstance(hist, dict):
+                meta_sex = bool(hist.get("__iniciada_vida_sexual__", False))
+
+            data["iniciada_vida_sexual"] = bool(
+                data.get("iniciada_vida_sexual") or tiene_obs or meta_sex
+            )
+        return data
