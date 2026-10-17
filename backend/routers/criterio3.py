@@ -33,6 +33,7 @@ from schemas.criterio3_schema import (
 from services.criterio3_service import (
     clasificar_foliculos_por_tipo,
     contar_foliculos,
+    estimar_foliculos_completo,
     evaluar_y_recortar_ecografia,
     generar_mapa_calor,
     guardar_estudio,
@@ -141,8 +142,7 @@ async def predecir(
 
         # ── Paso 6: Estimación folicular dinámica basada en contornos reales ─────
         try:
-            num_foliculos  = contar_foliculos(ruta_temp, prob_sop)
-            info_foliculos = clasificar_foliculos_por_tipo(prob_sop, num_detectados=num_foliculos)
+            num_foliculos, info_foliculos = estimar_foliculos_completo(ruta_temp, prob_sop)
         except Exception as e_fol:
             print("[WARN] Error calculando folículos:", e_fol)
             info_foliculos = {"antrales_pequenos": 0, "dominante": 0, "total": 0,
@@ -216,19 +216,16 @@ def get_stats():
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/estudios", response_model=list[EstudioEcograficoOut])
-def listar_estudios():
+def listar_estudios(paciente_id: Optional[UUID] = None):
     """
-    Lista todos los estudios ecográficos registrados en el sistema,
-    ordenados del más reciente al más antiguo.
+    Lista los estudios ecográficos registrados en el sistema,
+    opcionalmente filtrados por paciente, ordenados del más reciente al más antiguo.
     """
     try:
-        datos = (
-            supabase.table(TABLA)
-            .select("*")
-            .order("created_at", desc=True)
-            .execute()
-            .data
-        )
+        query = supabase.table(TABLA).select("*").order("created_at", desc=True)
+        if paciente_id:
+            query = query.eq("paciente_id", str(paciente_id))
+        datos = query.execute().data
         return datos or []
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
